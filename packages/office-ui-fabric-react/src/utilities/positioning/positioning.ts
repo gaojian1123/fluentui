@@ -71,6 +71,7 @@ export interface IElementPosition {
   elementRectangle: Rectangle;
   targetEdge: RectangleEdge;
   alignmentEdge: RectangleEdge | undefined;
+  forcedInBounds?: boolean;
 }
 
 export interface IElementPositionInfo extends IElementPosition {
@@ -184,13 +185,16 @@ function _getRelativeEdgeDifference(rect: Rectangle, hostRect: Rectangle, edge: 
  * @param {Rectangle} rect
  * @param {RectangleEdge} edge
  * @param {number} newValue
+ * @param {boolean} [maintainSize=true]
  * @returns {Rectangle}
  */
-function _moveEdge(rect: Rectangle, edge: RectangleEdge, newValue: number): Rectangle {
+function _moveEdge(rect: Rectangle, edge: RectangleEdge, newValue: number, maintainSize: boolean = true): Rectangle {
   const difference = _getEdgeValue(rect, edge) - newValue;
-  rect = _setEdgeValue(rect, edge, newValue);
-  rect = _setEdgeValue(rect, edge * -1, _getEdgeValue(rect, edge * -1) - difference);
-  return rect;
+  let returnRect = _setEdgeValue(rect, edge, newValue);
+  if (maintainSize) {
+    returnRect = _setEdgeValue(rect, edge * -1, _getEdgeValue(rect, edge * -1) - difference);
+  }
+  return returnRect;
 }
 
 /**
@@ -200,10 +204,11 @@ function _moveEdge(rect: Rectangle, edge: RectangleEdge, newValue: number): Rect
  * @param {Rectangle} target
  * @param {RectangleEdge} edge
  * @param {number} [gap=0]
+ * @param {boolean} [maintainSize=true]
  * @returns {Rectangle}
  */
-function _alignEdges(rect: Rectangle, target: Rectangle, edge: RectangleEdge, gap: number = 0): Rectangle {
-  return _moveEdge(rect, edge, _getEdgeValue(target, edge) + _getRelativeEdgeValue(edge, gap));
+function _alignEdges(rect: Rectangle, target: Rectangle, edge: RectangleEdge, gap: number = 0, maintainSize: boolean = true): Rectangle {
+  return _moveEdge(rect, edge, _getEdgeValue(target, edge) + _getRelativeEdgeValue(edge, gap), maintainSize);
 }
 
 /**
@@ -250,7 +255,7 @@ function _flipToFit(rect: Rectangle,
   target: Rectangle,
   bounding: Rectangle,
   positionData: IPositionDirectionalHintData,
-  gap: number = 0, ): IElementPosition {
+  gap: number = 0,): IElementPosition {
   const directions: RectangleEdge[] = [RectangleEdge.left, RectangleEdge.right, RectangleEdge.bottom, RectangleEdge.top];
   let currentEstimate = rect;
   let currentEdge = positionData.targetEdge;
@@ -275,7 +280,7 @@ function _flipToFit(rect: Rectangle,
     }
   }
   return {
-    elementRectangle: rect,
+    elementRectangle: currentEstimate,
     targetEdge: positionData.targetEdge,
     alignmentEdge: currentAlignment
   };
@@ -316,10 +321,17 @@ function _adjustFitWithinBounds(
     elementEstimate = _flipToFit(element, target, bounding, positionData, gap);
   }
 
-  const outOfBounds = _getOutOfBoundsEdges(element, bounding);
+  const outOfBounds = _getOutOfBoundsEdges(elementEstimate.elementRectangle, bounding);
 
   for (const direction of outOfBounds) {
-    elementEstimate.elementRectangle = _alignEdges(elementEstimate.elementRectangle, bounding, direction);
+    let edgeAttempt = _alignEdges(elementEstimate.elementRectangle, bounding, direction);
+
+    if (!_isEdgeInBounds(edgeAttempt, bounding, direction * -1)) {
+      edgeAttempt = _alignEdges(edgeAttempt, bounding, direction * -1, 0, false);
+      elementEstimate.forcedInBounds = true;
+    }
+
+    elementEstimate.elementRectangle = edgeAttempt;
   }
 
   return elementEstimate;
@@ -412,7 +424,8 @@ function _getFlankingEdges(edge: RectangleEdge): { positiveEdge: RectangleEdge, 
  * @param {HTMLElement} hostElement
  * @param {RectangleEdge} targetEdge
  * @param {RectangleEdge} [alignmentEdge]
- * @param {boolean} coverTarget
+ * @param {boolean} coverTarget,
+ * @param {boolean} forceWithBounds
  * @returns {IPartialIRectangle}
  */
 function _finalizeElementPosition(
@@ -420,17 +433,22 @@ function _finalizeElementPosition(
   hostElement: HTMLElement,
   targetEdge: RectangleEdge,
   alignmentEdge?: RectangleEdge,
-  coverTarget?: boolean
+  coverTarget?: boolean,
+  forceWithBounds?: boolean
 ): IPartialIRectangle {
   const returnValue: IPartialIRectangle = {};
 
   const hostRect: Rectangle = _getRectangleFromElement(hostElement);
   const elementEdge = coverTarget ? targetEdge : targetEdge * -1;
-  const elementEdgeString = RectangleEdge[elementEdge];
   const returnEdge = alignmentEdge ? alignmentEdge : _getFlankingEdges(targetEdge).positiveEdge;
 
-  returnValue[elementEdgeString] = _getRelativeEdgeDifference(elementRectangle, hostRect, elementEdge);
+  returnValue[RectangleEdge[elementEdge]] = _getRelativeEdgeDifference(elementRectangle, hostRect, elementEdge);
   returnValue[RectangleEdge[returnEdge]] = _getRelativeEdgeDifference(elementRectangle, hostRect, returnEdge);
+
+  if (forceWithBounds) {
+    returnValue[RectangleEdge[elementEdge * -1]] = _getRelativeEdgeDifference(elementRectangle, hostRect, elementEdge * -1);
+    returnValue[RectangleEdge[returnEdge * -1]] = _getRelativeEdgeDifference(elementRectangle, hostRect, returnEdge * -1);
+  }
 
   return returnValue;
 }
@@ -672,7 +690,8 @@ function _finalizePositionData(positionedElement: IElementPosition, hostElement:
     hostElement,
     positionedElement.targetEdge,
     positionedElement.alignmentEdge,
-    coverTarget
+    coverTarget,
+    positionedElement.forcedInBounds
   );
   return {
     elementPosition: finalizedElement,
@@ -805,7 +824,7 @@ export function getMaxHeight(target: Element | MouseEvent | IPoint, targetEdge: 
     _getRectangleFromIRect(bounds) :
     new Rectangle(0, window.innerWidth - getScrollbarWidth(), 0, window.innerHeight);
 
-  if (mouseTarget.stopPropagation) {
+  if (!!mouseTarget.stopPropagation) {
     targetRect = new Rectangle(mouseTarget.clientX, mouseTarget.clientX, mouseTarget.clientY, mouseTarget.clientY);
   } else if (pointTarget.x !== undefined && pointTarget.y !== undefined) {
     targetRect = new Rectangle(pointTarget.x, pointTarget.x, pointTarget.y, pointTarget.y);
